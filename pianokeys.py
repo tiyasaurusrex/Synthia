@@ -26,6 +26,8 @@ VOLUME = 0.4
 BASE_DECAY = 1.0
 SUSTAIN_DECAY = 2.5
 DECAY_SCALING = 2000.0
+ATTACK = 0.008
+ATTACK_SAMPLES = max(1, int(ATTACK * SAMPLE_RATE))
 
 active_notes = {}
 sustain_active = False
@@ -41,21 +43,35 @@ def synth_callback(outdata, frames, time_info, status):
         for freq, note in list(active_notes.items()):
             # Age is counted in samples already played, not wall-clock time:
             # the audio clock is the only one in step with the buffers.
-            age = note["samples"] / SAMPLE_RATE
+            played = note["samples"]
 
             base_decay = BASE_DECAY * (DECAY_SCALING / (freq + DECAY_SCALING))
             decay = SUSTAIN_DECAY if sustain_active else base_decay
 
             # Envelope (Attack + Decay), evaluated per sample.
-            # A scalar per buffer would quantise the 8 ms attack to the
-            # buffer length (~46 ms at 2048 frames) and step the decay at
-            # every seam, so the envelope is sampled across the buffer.
-            attack = 0.008
-            ages = age + t
-            envelope = np.where(
-                ages < attack,
-                ages / attack,
-                np.exp(-np.maximum(ages - attack, 0.0) / decay)
+            #
+            # The decay continues from the note's CURRENT level rather than
+            # being recomputed from its age. Recomputing would make the
+            # envelope jump the instant `decay` changes -- releasing sustain
+            # swaps tau from 2.5 s to ~0.9 s, and exp(-age/tau) collapses, so
+            # the note was cut off instead of being damped. Carrying the
+            # level forward keeps amplitude continuous and lets only the
+            # slope change, which is what a damper actually does.
+            ramp = max(0, min(frames, ATTACK_SAMPLES - played))
+            envelope = np.empty(frames, dtype=np.float64)
+
+            if ramp > 0:
+                envelope[:ramp] = (played + np.arange(ramp)) / ATTACK_SAMPLES
+                level = 1.0
+            else:
+                level = note["level"]
+
+            tail = np.arange(frames - ramp)
+            envelope[ramp:] = level * np.exp(-tail / (SAMPLE_RATE * decay))
+
+            # Level at the first sample of the next buffer.
+            note["level"] = float(
+                level * np.exp(-(frames - ramp) / (SAMPLE_RATE * decay))
             )
 
             # Phase
@@ -84,7 +100,7 @@ def synth_callback(outdata, frames, time_info, status):
 
             # Decay already accounts for sustain, so an inaudible note is
             # always safe to drop -- otherwise held notes pile up forever.
-            if ages[-1] > attack and envelope[-1] < 0.0008:
+            if note["samples"] > ATTACK_SAMPLES and envelope[-1] < 0.0008:
                 finished.append(freq)
 
         for f in finished:
@@ -132,7 +148,8 @@ def on_press(key):
             with lock:
                 active_notes[freq] = {
                     "phase": 0.0,
-                    "samples": 0
+                    "samples": 0,
+                    "level": 1.0
                 }
 
     elif char in ['1','2','3','4','5','6']:

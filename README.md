@@ -38,7 +38,7 @@ Every note is synthesized in real time using additive harmonic modeling and expo
 ## Sustain Pedal Simulation
 - Spacebar acts as sustain pedal
 - Extended decay time
-- Natural resonance behavior
+- Damped smoothly on release, not cut off
 
 ## Frequency-Dependent Decay
 - Higher notes decay faster
@@ -123,22 +123,29 @@ A(t) = e^(-(t - t_attack) / τ)   for t ≥ t_attack
 Implemented as:
 
 ```python
-attack = 0.008
-ages = age + t
-envelope = np.where(
-    ages < attack,
-    ages / attack,
-    np.exp(-np.maximum(ages - attack, 0.0) / decay)
-)
+ramp = max(0, min(frames, ATTACK_SAMPLES - played))
+if ramp > 0:
+    envelope[:ramp] = (played + np.arange(ramp)) / ATTACK_SAMPLES
+    level = 1.0
+else:
+    level = note["level"]
+
+tail = np.arange(frames - ramp)
+envelope[ramp:] = level * np.exp(-tail / (SAMPLE_RATE * decay))
+note["level"] = float(level * np.exp(-(frames - ramp) / (SAMPLE_RATE * decay)))
 ```
 
 The 8 ms attack ramp removes the click of a waveform starting at full
 amplitude; the exponential tail gives a smooth, natural fade-out.
 
-Note that the envelope is evaluated **per sample**, not once per buffer.
-A single scalar per buffer would quantise the 8 ms attack to the buffer
-length (~46 ms at 2048 frames) and step the decay at every buffer
-boundary.
+Two properties of this formulation matter:
+
+- The envelope is evaluated **per sample**, not once per buffer. A single
+  scalar per buffer would quantise the 8 ms attack to the buffer length
+  (~46 ms at 2048 frames) and step the decay at every boundary.
+- The decay continues from the note's **current level**, carried forward
+  in `note["level"]`, rather than being recomputed from the note's age.
+  This is what makes a changing τ safe — see below.
 
 ---
 
@@ -155,6 +162,21 @@ Effect:
 - High frequency → short sustain
 
 This dramatically improves realism.
+
+### Why the level is carried forward
+
+τ is not constant for the life of a note — it switches to `SUSTAIN_DECAY`
+while the pedal is down and back to `base_decay` when it is released.
+
+If the envelope were recomputed from the note's age, `e^(-age/τ)` would
+jump the instant τ changed. Releasing the pedal on a note held for 5 s
+swaps τ from 2.5 s to ~0.9 s, which drops the envelope from 0.135 to
+0.004 between one buffer and the next — the note is **cut off** rather
+than damped, and the discontinuity is audible as a click.
+
+Carrying `note["level"]` forward means amplitude is always continuous and
+only the *slope* changes when the pedal moves. That is the behaviour of a
+real damper falling onto a ringing string.
 
 ---
 
