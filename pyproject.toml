@@ -43,9 +43,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/tiyasaurusrex/Synthia."
-Source = "https://github.com/tiyasaurusrex/Synthia."
-Issues = "https://github.com/tiyasaurusrex/Synthia./issues"
+Homepage = "https://github.com/tiyasaurusrex/Synthia"
+Source = "https://github.com/tiyasaurusrex/Synthia"
+Issues = "https://github.com/tiyasaurusrex/Synthia/issues"
 
 [project.scripts]
 synthia = "synthia.piano:main"

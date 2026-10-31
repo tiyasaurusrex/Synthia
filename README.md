@@ -327,8 +327,8 @@ Synthia reads the keyboard globally, so the OS has to allow it:
 ## Running from source
 
 ```bash
-git clone https://github.com/tiyasaurusrex/Synthia..git
-cd Synthia.
+git clone https://github.com/tiyasaurusrex/Synthia.git
+cd Synthia
 pip install -e .
 synthia
 ```
