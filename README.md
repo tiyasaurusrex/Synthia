@@ -176,7 +176,7 @@ linear in the number of sources. Dividing by the square root is the
 compromise:
 
 ```python
-chunk *= VOLUME / np.sqrt(len(active_notes))
+chunk *= VOLUME / np.sqrt(sounding)
 ```
 
 A chord and a single note then sit at roughly the same perceived loudness.
@@ -184,9 +184,9 @@ A chord and a single note then sit at roughly the same perceived loudness.
 ### Two threads
 
 The keyboard listener and the audio callback run on separate threads. The
-listener adds and removes entries in a dictionary of active notes; the
-callback reads it about twenty times a second to build each block. A lock
-around both keeps them from touching it at the same moment.
+listener adds notes to the table the `Synth` holds; the callback reads that
+table about twenty times a second to build each block. A lock around both
+keeps them from touching it at the same moment.
 
 ## Running from a clone
 
@@ -197,8 +197,10 @@ pip install -e .
 synthia
 ```
 
-The whole synthesizer is one file, `src/synthia/piano.py`, and it is short
-enough to read in a sitting.
+The whole synthesizer is one file, `src/synthia/piano.py`: a `Note` that
+knows how to render itself, a `Synth` that mixes the sounding notes, and a
+`PianoKeys` that turns key presses into notes. It is short enough to read in
+a sitting.
 
 ## Known limitations
 

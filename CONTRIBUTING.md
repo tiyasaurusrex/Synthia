@@ -2,9 +2,9 @@
 
 Patches are welcome. Open a pull request against `main` and I'll take a look.
 
-If you're planning something substantial — a new synthesis method, an effects
-chain, MIDI support — open an issue first so we can agree on the shape of it
-before you spend an evening on it.
+If you're planning something substantial, like a new synthesis method, an
+effects chain or MIDI support, open an issue first so we can agree on the
+shape of it before you spend an evening on it.
 
 ## Getting set up
 
@@ -18,11 +18,19 @@ synthia
 `-e` installs it in editable mode, so your changes take effect without
 reinstalling.
 
-The synthesizer is one file: `src/synthia/piano.py`. The audio callback at the
-top is where sound is actually made; the keyboard handlers are below it. The
-README explains the DSP reasoning behind each part, and it's worth reading
-that section before changing the envelope or the phase handling — both have
-non-obvious constraints that are easy to break by accident.
+The synthesizer is one file, `src/synthia/piano.py`, with three classes:
+
+- `Note` holds one sounding note and renders its own waveform. It keeps the
+  state that has to survive between audio blocks: phase, elapsed samples and
+  current amplitude.
+- `Synth` owns the table of sounding notes and mixes them into each block.
+  Its `callback` is what the audio device calls.
+- `PianoKeys` turns key presses into notes, octave changes and pedal
+  movements.
+
+The README explains the DSP reasoning behind each part. It's worth reading
+that section before you change the envelope or the phase handling, since both
+have non-obvious constraints that are easy to break by accident.
 
 ## Testing a change
 
@@ -33,7 +41,7 @@ than things that fail an assertion, so testing means playing it:
 - Play chords, and hold a lot of keys at once to check nothing clips or
   distorts.
 - Hold the pedal, then release it while notes are still ringing. Listen for
-  clicks or notes stopping abruptly — that's the most fragile part of the
+  clicks or notes stopping abruptly, which is the most fragile part of the
   code.
 - Let notes decay fully and confirm they go silent rather than cutting out.
 
@@ -45,12 +53,15 @@ description of what you hear is genuinely useful.
 
 ## Style
 
-Match what's already there. The code is deliberately plain — module-level
-functions, no classes, few comments. Comments are reserved for things that
-are surprising rather than things the code already says. If a comment would
-restate the line below it, leave it out.
+Match what's already there. State lives on the classes rather than in module
+globals, and the constants at the top of the file are named instead of being
+written inline.
 
-Keep commit messages descriptive: what changed and why, not just what file
+Comments are reserved for things that are surprising rather than things the
+code already says. If a comment would restate the line below it, leave it
+out.
+
+Keep commit messages descriptive: what changed and why, not just which file
 you touched.
 
 ## Licensing
@@ -65,5 +76,5 @@ MIT lets you fork and modify this freely, and you don't need my permission.
 I'd rather have your changes here than scattered across forks, so if you've
 built something that improves Synthia, please do send it upstream.
 
-The name is the one exception: the license covers the code, not the project
+The name is the one exception. The license covers the code, not the project
 name, so please don't release a modified version as "Synthia".

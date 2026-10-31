@@ -1,4 +1,4 @@
-# Digital Signal Processing PERSONAL PROJECT
+"""Real-time piano synthesis: waveform generation, mixing and key handling."""
 
 import sys
 import threading
@@ -7,7 +7,6 @@ import numpy as np
 import sounddevice as sd
 from pynput import keyboard
 
-# Frequencies
 piano_freqs = {
     "A0": 27.50, "B0": 30.87,
     "C1": 32.70, "C#1": 34.65, "D1": 36.71, "D#1": 38.89, "E1": 41.20,
@@ -23,85 +22,7 @@ piano_freqs = {
     "C6": 1046.50
 }
 
-SAMPLE_RATE = 44100
-VOLUME = 0.4
-BASE_DECAY = 1.0
-SUSTAIN_DECAY = 2.5
-DECAY_SCALING = 2000.0
-ATTACK = 0.008
-ATTACK_SAMPLES = max(1, int(ATTACK * SAMPLE_RATE))
-BLOCK_SIZE = 2048
-
-active_notes = {}
-sustain_active = False
-current_octave = 4
-lock = threading.Lock()
-
-def synth_callback(outdata, frames, time_info, status):
-    t = np.arange(frames) / SAMPLE_RATE
-    chunk = np.zeros(frames, dtype=np.float32)
-    finished = []
-
-    with lock:
-        for freq, note in list(active_notes.items()):
-            played = note["samples"]
-
-            base_decay = BASE_DECAY * (DECAY_SCALING / (freq + DECAY_SCALING))
-            decay = SUSTAIN_DECAY if sustain_active else base_decay
-
-            # Decay continues from the note's current level, so a change of
-            # tau bends the slope instead of stepping the amplitude.
-            ramp = max(0, min(frames, ATTACK_SAMPLES - played))
-            envelope = np.empty(frames, dtype=np.float64)
-
-            if ramp > 0:
-                envelope[:ramp] = (played + np.arange(ramp)) / ATTACK_SAMPLES
-                level = 1.0
-            else:
-                level = note["level"]
-
-            tail = np.arange(frames - ramp)
-            envelope[ramp:] = level * np.exp(-tail / (SAMPLE_RATE * decay))
-
-            note["level"] = float(
-                level * np.exp(-(frames - ramp) / (SAMPLE_RATE * decay))
-            )
-
-            phase = note["phase"] + 2 * np.pi * freq * t
-
-            wave = (
-                    np.sin(phase)
-                    + 0.25 * np.sin(2 * phase)
-                    + 0.1 * np.sin(3 * phase)
-                    + 0.03 * np.sin(4 * phase)
-                )
-
-            wave *= envelope
-
-            chunk += wave
-
-            # A full `frames` of phase: phase[-1] is the last sample
-            # rendered, and the next buffer starts after it.
-            note["phase"] = float(
-                (note["phase"] + 2 * np.pi * freq * frames / SAMPLE_RATE)
-                % (2 * np.pi)
-            )
-            note["samples"] += frames
-
-            if note["samples"] > ATTACK_SAMPLES and envelope[-1] < 0.0008:
-                finished.append(freq)
-
-        for f in finished:
-            active_notes.pop(f, None)
-
-    if active_notes:
-        chunk *= VOLUME / np.sqrt(len(active_notes))
-
-    outdata[:] = chunk.reshape(-1, 1)
-
-
-# Note Layout
-key_to_note = {
+KEY_TO_NOTE = {
     'z': 'C',  's': 'C#',
     'x': 'D',  'd': 'D#',
     'c': 'E',
@@ -111,65 +32,190 @@ key_to_note = {
     'm': 'B'
 }
 
+SAMPLE_RATE = 44100
+VOLUME = 0.4
+BASE_DECAY = 1.0
+SUSTAIN_DECAY = 2.5
+DECAY_SCALING = 2000.0
+ATTACK = 0.008
+ATTACK_SAMPLES = max(1, int(ATTACK * SAMPLE_RATE))
+BLOCK_SIZE = 2048
+SILENCE = 0.0008
+MIN_OCTAVE = 1
+MAX_OCTAVE = 6
+HARMONICS = ((1, 1.0), (2, 0.25), (3, 0.1), (4, 0.03))
 
-def on_press(key):
-    global sustain_active, current_octave
-
-    # Special keys have no .char, so match them first.
-    if key == keyboard.Key.space:
-        sustain_active = True
-        return
-
-    if key == keyboard.Key.esc:
-        return False
-
-    char = getattr(key, "char", None)
-    if char is None:
-        return
-
-    if char in key_to_note:
-        note_name = key_to_note[char]
-        full_note = note_name + str(current_octave)
-
-        if full_note in piano_freqs:
-            freq = piano_freqs[full_note]
-            with lock:
-                active_notes[freq] = {
-                    "phase": 0.0,
-                    "samples": 0,
-                    "level": 1.0
-                }
-
-    elif char in ['1','2','3','4','5','6']:
-        current_octave = int(char)
-        print(f"Octave = {current_octave}")
-
-    elif char == ']':
-        current_octave = min(6, current_octave + 1)
-        print(f"Octave = {current_octave}")
-
-    elif char == '[':
-        current_octave = max(1, current_octave - 1)
-        print(f"Octave = {current_octave}")
+BANNER = "Piano | 1-6 = octave | [ ] = shift | SPACE = sustain | ESC = quit"
 
 
-def on_release(key):
-    global sustain_active
-    if key == keyboard.Key.space:
-        sustain_active = False
+class Note:
+    """One sounding note, carrying the state that must survive between blocks.
+
+    Phase, elapsed samples and current amplitude all persist across calls to
+    render, because each block has to continue exactly where the last ended.
+    """
+
+    __slots__ = ("freq", "phase", "samples", "level", "tail_amplitude",
+                 "natural_decay")
+
+    def __init__(self, freq):
+        self.freq = float(freq)
+        self.phase = 0.0
+        self.samples = 0
+        self.level = 1.0
+        self.tail_amplitude = 1.0
+        self.natural_decay = BASE_DECAY * (
+            DECAY_SCALING / (self.freq + DECAY_SCALING)
+        )
+
+    @property
+    def finished(self):
+        """True once the note has decayed past hearing."""
+        return self.samples > ATTACK_SAMPLES and self.tail_amplitude < SILENCE
+
+    def _envelope(self, frames, decay):
+        ramp = max(0, min(frames, ATTACK_SAMPLES - self.samples))
+        envelope = np.empty(frames, dtype=np.float64)
+
+        if ramp > 0:
+            envelope[:ramp] = (
+                self.samples + np.arange(ramp)
+            ) / ATTACK_SAMPLES
+            level = 1.0
+        else:
+            level = self.level
+
+        # Decay continues from the current level, so a change of tau bends
+        # the slope instead of stepping the amplitude.
+        tail = np.arange(frames - ramp)
+        envelope[ramp:] = level * np.exp(-tail / (SAMPLE_RATE * decay))
+        self.level = float(
+            level * np.exp(-(frames - ramp) / (SAMPLE_RATE * decay))
+        )
+        return envelope
+
+    def render(self, t, frames, sustained):
+        """Return this note's contribution to one block, advancing its state."""
+        decay = SUSTAIN_DECAY if sustained else self.natural_decay
+        envelope = self._envelope(frames, decay)
+
+        phase = self.phase + 2 * np.pi * self.freq * t
+        wave = sum(
+            amplitude * np.sin(partial * phase)
+            for partial, amplitude in HARMONICS
+        )
+        wave *= envelope
+
+        # A full `frames` of phase: phase[-1] is the last sample rendered,
+        # and the next block starts after it.
+        self.phase = float(
+            (self.phase + 2 * np.pi * self.freq * frames / SAMPLE_RATE)
+            % (2 * np.pi)
+        )
+        self.samples += frames
+        self.tail_amplitude = float(envelope[-1])
+        return wave
 
 
-BANNER = "Piano | 1–6 = octave | [ ] = shift | SPACE = sustain | ESC = quit"
+class Synth:
+    """Holds the sounding notes and mixes them into the output stream.
+
+    The audio callback and the keyboard listener run on different threads, so
+    every touch of the note table is locked.
+    """
+
+    def __init__(self):
+        self.sustained = False
+        self._notes = {}
+        self._lock = threading.Lock()
+
+    def note_on(self, freq):
+        with self._lock:
+            self._notes[freq] = Note(freq)
+
+    @property
+    def active(self):
+        with self._lock:
+            return dict(self._notes)
+
+    def callback(self, outdata, frames, time_info, status):
+        t = np.arange(frames) / SAMPLE_RATE
+        chunk = np.zeros(frames, dtype=np.float32)
+
+        with self._lock:
+            for note in list(self._notes.values()):
+                chunk += note.render(t, frames, self.sustained)
+
+            for freq, note in list(self._notes.items()):
+                if note.finished:
+                    del self._notes[freq]
+
+            sounding = len(self._notes)
+
+        if sounding:
+            # Square root rather than the count: loudness is not linear in
+            # the number of sources, so dividing by n makes chords limp.
+            chunk *= VOLUME / np.sqrt(sounding)
+
+        outdata[:] = chunk.reshape(-1, 1)
+
+
+class PianoKeys:
+    """Turns key presses into notes, octave changes and pedal movements."""
+
+    def __init__(self, synth, octave=4):
+        self.synth = synth
+        self.octave = octave
+
+    def on_press(self, key):
+        # Special keys have no .char, so match them first.
+        if key == keyboard.Key.space:
+            self.synth.sustained = True
+            return None
+
+        if key == keyboard.Key.esc:
+            return False
+
+        char = getattr(key, "char", None)
+        if char is None:
+            return None
+
+        if char in KEY_TO_NOTE:
+            note_name = KEY_TO_NOTE[char] + str(self.octave)
+            if note_name in piano_freqs:
+                self.synth.note_on(piano_freqs[note_name])
+
+        elif char in "123456":
+            self._set_octave(int(char))
+
+        elif char == ']':
+            self._set_octave(self.octave + 1)
+
+        elif char == '[':
+            self._set_octave(self.octave - 1)
+
+        return None
+
+    def on_release(self, key):
+        if key == keyboard.Key.space:
+            self.synth.sustained = False
+
+    def _set_octave(self, value):
+        self.octave = max(MIN_OCTAVE, min(MAX_OCTAVE, value))
+        print(f"Octave = {self.octave}")
 
 
 def main():
     """Open the audio stream and play until ESC is pressed."""
+    synth = Synth()
+    keys = PianoKeys(synth)
+
     try:
         stream = sd.OutputStream(
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype='float32',
-            callback=synth_callback,
+            callback=synth.callback,
             blocksize=BLOCK_SIZE,
             latency='low'
         )
@@ -182,7 +228,7 @@ def main():
     stream.start()
     try:
         with keyboard.Listener(
-            on_press=on_press, on_release=on_release
+            on_press=keys.on_press, on_release=keys.on_release
         ) as listener:
             listener.join()
     except KeyboardInterrupt:
