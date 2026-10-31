@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "synthia-piano"
+dynamic = ["version"]
+description = "Real-time piano synthesizer built from first principles -- no samples, no sound engine, just DSP."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Tiyasa Paul" }]
+keywords = [
+    "dsp",
+    "audio",
+    "synthesis",
+    "synthesizer",
+    "piano",
+    "real-time-audio",
+    "digital-signal-processing",
+    "additive-synthesis",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Sound Synthesis",
+    "Topic :: Education",
+]
+dependencies = [
+    "numpy>=1.20",
+    "sounddevice>=0.4.4",
+    "pynput>=1.7.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/tiyasaurusrex/Synthia."
+Source = "https://github.com/tiyasaurusrex/Synthia."
+Issues = "https://github.com/tiyasaurusrex/Synthia./issues"
+
+[project.scripts]
+synthia = "synthia.piano:main"
+
+[tool.hatch.version]
+path = "src/synthia/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/synthia"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/synthia", "README.md", "LICENSE", "pyproject.toml"]
