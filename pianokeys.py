@@ -3,7 +3,7 @@
 import numpy as np
 import sounddevice as sd
 from pynput import keyboard
-import threading, time
+import threading
 
 # Frequencies
 piano_freqs = {
@@ -35,22 +35,28 @@ lock = threading.Lock()
 def synth_callback(outdata, frames, time_info, status):
     t = np.arange(frames) / SAMPLE_RATE
     chunk = np.zeros(frames, dtype=np.float32)
-    now = time.perf_counter()
     finished = []
 
     with lock:
         for freq, note in list(active_notes.items()):
-            age = now - note["start_time"]
+            # Age is counted in samples already played, not wall-clock time:
+            # the audio clock is the only one in step with the buffers.
+            age = note["samples"] / SAMPLE_RATE
 
             base_decay = BASE_DECAY * (DECAY_SCALING / (freq + DECAY_SCALING))
             decay = SUSTAIN_DECAY if sustain_active else base_decay
 
-            # Envelope (Attack + Decay)
+            # Envelope (Attack + Decay), evaluated per sample.
+            # A scalar per buffer would quantise the 8 ms attack to the
+            # buffer length (~46 ms at 2048 frames) and step the decay at
+            # every seam, so the envelope is sampled across the buffer.
             attack = 0.008
-            if age < attack:
-                envelope = age / attack
-            else:
-                envelope = np.exp(-(age - attack) / decay)
+            ages = age + t
+            envelope = np.where(
+                ages < attack,
+                ages / attack,
+                np.exp(-np.maximum(ages - attack, 0.0) / decay)
+            )
 
             # Phase
             phase = note["phase"] + 2 * np.pi * freq * t
@@ -66,9 +72,19 @@ def synth_callback(outdata, frames, time_info, status):
             wave *= envelope
 
             chunk += wave
-            note["phase"] = float(phase[-1] % (2 * np.pi))
 
-            if envelope < 0.0008 and not sustain_active:
+            # Advance by a full `frames` worth of phase, not frames - 1:
+            # phase[-1] is the last sample rendered, and the next buffer
+            # starts one sample after it.
+            note["phase"] = float(
+                (note["phase"] + 2 * np.pi * freq * frames / SAMPLE_RATE)
+                % (2 * np.pi)
+            )
+            note["samples"] += frames
+
+            # Decay already accounts for sustain, so an inaudible note is
+            # always safe to drop -- otherwise held notes pile up forever.
+            if ages[-1] > attack and envelope[-1] < 0.0008:
                 finished.append(freq)
 
         for f in finished:
@@ -95,37 +111,41 @@ key_to_note = {
 def on_press(key):
     global sustain_active, current_octave
 
-    try:
-        if key.char in key_to_note:
-            note_name = key_to_note[key.char]
-            full_note = note_name + str(current_octave)
+    # Special keys have no .char, so they are matched before any char lookup.
+    if key == keyboard.Key.space:
+        sustain_active = True
+        return
 
-            if full_note in piano_freqs:
-                freq = piano_freqs[full_note]
-                with lock:
-                    active_notes[freq] = {
-                        "phase": 0.0,
-                        "start_time": time.perf_counter()
-                    }
+    if key == keyboard.Key.esc:
+        return False
 
-        elif key.char in ['1','2','3','4','5','6']:
-            current_octave = int(key.char)
-            print(f"Octave = {current_octave}")
+    char = getattr(key, "char", None)
+    if char is None:
+        return
 
-        elif key.char == ']':
-            current_octave = min(6, current_octave + 1)
-            print(f"Octave = {current_octave}")
+    if char in key_to_note:
+        note_name = key_to_note[char]
+        full_note = note_name + str(current_octave)
 
-        elif key.char == '[':
-            current_octave = max(1, current_octave - 1)
-            print(f"Octave = {current_octave}")
+        if full_note in piano_freqs:
+            freq = piano_freqs[full_note]
+            with lock:
+                active_notes[freq] = {
+                    "phase": 0.0,
+                    "samples": 0
+                }
 
-        elif key == keyboard.Key.space:
-            sustain_active = True
+    elif char in ['1','2','3','4','5','6']:
+        current_octave = int(char)
+        print(f"Octave = {current_octave}")
 
-    except AttributeError:
-        if key == keyboard.Key.esc:
-            return False
+    elif char == ']':
+        current_octave = min(6, current_octave + 1)
+        print(f"Octave = {current_octave}")
+
+    elif char == '[':
+        current_octave = max(1, current_octave - 1)
+        print(f"Octave = {current_octave}")
 
 
 def on_release(key):
