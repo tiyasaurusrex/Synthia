@@ -38,7 +38,7 @@ Every note is synthesized in real time using additive harmonic modeling and expo
 ## Sustain Pedal Simulation
 - Spacebar acts as sustain pedal
 - Extended decay time
-- Natural resonance behavior
+- Damped smoothly on release, not cut off
 
 ## Frequency-Dependent Decay
 - Higher notes decay faster
@@ -94,33 +94,58 @@ Real pianos are not pure sine waves.
 We model richer timbre as:
 
 sin(φ)  
-+ 0.6 sin(2φ + 0.02)  
-+ 0.3 sin(3φ + 0.03)
++ 0.25 sin(2φ)  
++ 0.10 sin(3φ)  
++ 0.03 sin(4φ)
 
 This adds:
 - Fundamental → pitch perception
 - 2nd harmonic → brightness
 - 3rd harmonic → warmth
+- 4th harmonic → a touch of bite
+
+The upper partials are kept deliberately quiet so the tone stays warm
+rather than organ-like.
 
 This technique is called **Additive Synthesis**.
 
 ---
 
-## 4. Exponential Amplitude Envelope
+## 4. Linear Attack + Exponential Amplitude Envelope
 
-Real piano strings decay exponentially.
+A struck string ramps up over a few milliseconds, then decays exponentially.
 
 Mathematically:
 
-A(t) = e^(-t / τ)
+A(t) = t / t_attack           for t < t_attack  
+A(t) = e^(-(t - t_attack) / τ)   for t ≥ t_attack
 
 Implemented as:
 
 ```python
-envelope = np.exp(-age / decay)
+ramp = max(0, min(frames, ATTACK_SAMPLES - played))
+if ramp > 0:
+    envelope[:ramp] = (played + np.arange(ramp)) / ATTACK_SAMPLES
+    level = 1.0
+else:
+    level = note["level"]
+
+tail = np.arange(frames - ramp)
+envelope[ramp:] = level * np.exp(-tail / (SAMPLE_RATE * decay))
+note["level"] = float(level * np.exp(-(frames - ramp) / (SAMPLE_RATE * decay)))
 ```
 
-This creates smooth, natural fade-out.
+The 8 ms attack ramp removes the click of a waveform starting at full
+amplitude; the exponential tail gives a smooth, natural fade-out.
+
+Two properties of this formulation matter:
+
+- The envelope is evaluated **per sample**, not once per buffer. A single
+  scalar per buffer would quantise the 8 ms attack to the buffer length
+  (~46 ms at 2048 frames) and step the decay at every boundary.
+- The decay continues from the note's **current level**, carried forward
+  in `note["level"]`, rather than being recomputed from the note's age.
+  This is what makes a changing τ safe — see below.
 
 ---
 
@@ -138,15 +163,44 @@ Effect:
 
 This dramatically improves realism.
 
+### Why the level is carried forward
+
+τ is not constant for the life of a note — it switches to `SUSTAIN_DECAY`
+while the pedal is down and back to `base_decay` when it is released.
+
+If the envelope were recomputed from the note's age, `e^(-age/τ)` would
+jump the instant τ changed. Releasing the pedal on a note held for 5 s
+swaps τ from 2.5 s to ~0.9 s, which drops the envelope from 0.135 to
+0.004 between one buffer and the next — the note is **cut off** rather
+than damped, and the discontinuity is audible as a click.
+
+Carrying `note["level"]` forward means amplitude is always continuous and
+only the *slope* changes when the pedal moves. That is the behaviour of a
+real damper falling onto a ringing string.
+
 ---
 
-## 7. Phase Continuity
+## 6. Phase Continuity
 
-Each note stores its phase:
+Each note carries its own phase and its own sample counter across buffers:
 
 ```python
-note["phase"]
+note["phase"] = float(
+    (note["phase"] + 2 * np.pi * freq * frames / SAMPLE_RATE)
+    % (2 * np.pi)
+)
+note["samples"] += frames
 ```
+
+Two details matter here:
+
+- Phase advances by a full `frames` worth, not `frames - 1`. `phase[-1]`
+  is the **last sample rendered**, and the next buffer begins one sample
+  after it — reusing it duplicates a sample at every seam.
+- Note age is measured in **samples played**, not wall-clock time. The
+  audio clock is the only one in step with the buffers; reading
+  `perf_counter()` in the callback makes the envelope jitter against
+  callback scheduling.
 
 Why this matters:
 - Prevents audio clicks
@@ -207,24 +261,33 @@ Sound Device Output
 ## Audio Configuration
 - Sample Rate: 44100 Hz
 - Channels: Mono
-- Block Size: 4086
-- Latency Mode: High (stability prioritized)
+- Block Size: 2048
+- Latency Mode: Low (responsiveness prioritized)
 
 ---
 
 #  Keyboard Layout
 
-## Lower Octave (C3 – E4)
+One chromatic octave is mapped to the keyboard at a time, and the octave
+itself is switchable — so the full A0–C6 frequency table is reachable.
 
-z s x d c v g b h n j m , l . ; /
+## Chromatic Octave
 
-## Upper Octave (F4 – E5)
-
-q 2 w 3 e 4 r t 6 y 7 u
+| Key | Note | | Key | Note |
+|-----|------|-|-----|------|
+| `z` | C    | | `b` | G    |
+| `s` | C#   | | `h` | G#   |
+| `x` | D    | | `n` | A    |
+| `d` | D#   | | `j` | A#   |
+| `c` | E    | | `m` | B    |
+| `v` | F    | |     |      |
+| `g` | F#   | |     |      |
 
 ## Controls
 
-- SPACE → Sustain Pedal  
+- `1`–`6` → jump straight to that octave (default: 4)  
+- `[` / `]` → shift one octave down / up (clamped to 1–6)  
+- SPACE → Sustain Pedal (hold)  
 - ESC → Quit Program  
 
 ---
@@ -244,7 +307,7 @@ pip install numpy sounddevice pynput
 ## Run the Program
 
 ```bash
-python piano.py
+python pianokeys.py
 ```
 
 ---
@@ -252,7 +315,7 @@ python piano.py
 #  Internal Execution Flow
 
 1. User presses a key
-2. Frequency is added to `active_notes`
+2. The key is resolved to a note name, combined with the current octave, and its frequency is added to `active_notes`
 3. Audio callback continuously runs
 4. For each buffer:
    - Generate sine waves
