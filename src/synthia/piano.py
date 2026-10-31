@@ -1,9 +1,11 @@
 # Digital Signal Processing PERSONAL PROJECT
 
+import sys
+import threading
+
 import numpy as np
 import sounddevice as sd
 from pynput import keyboard
-import threading
 
 # Frequencies
 piano_freqs = {
@@ -28,6 +30,7 @@ SUSTAIN_DECAY = 2.5
 DECAY_SCALING = 2000.0
 ATTACK = 0.008
 ATTACK_SAMPLES = max(1, int(ATTACK * SAMPLE_RATE))
+BLOCK_SIZE = 2048
 
 active_notes = {}
 sustain_active = False
@@ -41,22 +44,13 @@ def synth_callback(outdata, frames, time_info, status):
 
     with lock:
         for freq, note in list(active_notes.items()):
-            # Age is counted in samples already played, not wall-clock time:
-            # the audio clock is the only one in step with the buffers.
             played = note["samples"]
 
             base_decay = BASE_DECAY * (DECAY_SCALING / (freq + DECAY_SCALING))
             decay = SUSTAIN_DECAY if sustain_active else base_decay
 
-            # Envelope (Attack + Decay), evaluated per sample.
-            #
-            # The decay continues from the note's CURRENT level rather than
-            # being recomputed from its age. Recomputing would make the
-            # envelope jump the instant `decay` changes -- releasing sustain
-            # swaps tau from 2.5 s to ~0.9 s, and exp(-age/tau) collapses, so
-            # the note was cut off instead of being damped. Carrying the
-            # level forward keeps amplitude continuous and lets only the
-            # slope change, which is what a damper actually does.
+            # Decay continues from the note's current level, so a change of
+            # tau bends the slope instead of stepping the amplitude.
             ramp = max(0, min(frames, ATTACK_SAMPLES - played))
             envelope = np.empty(frames, dtype=np.float64)
 
@@ -69,15 +63,12 @@ def synth_callback(outdata, frames, time_info, status):
             tail = np.arange(frames - ramp)
             envelope[ramp:] = level * np.exp(-tail / (SAMPLE_RATE * decay))
 
-            # Level at the first sample of the next buffer.
             note["level"] = float(
                 level * np.exp(-(frames - ramp) / (SAMPLE_RATE * decay))
             )
 
-            # Phase
             phase = note["phase"] + 2 * np.pi * freq * t
 
-            # Warmer Harmonic Structure
             wave = (
                     np.sin(phase)
                     + 0.25 * np.sin(2 * phase)
@@ -89,17 +80,14 @@ def synth_callback(outdata, frames, time_info, status):
 
             chunk += wave
 
-            # Advance by a full `frames` worth of phase, not frames - 1:
-            # phase[-1] is the last sample rendered, and the next buffer
-            # starts one sample after it.
+            # A full `frames` of phase: phase[-1] is the last sample
+            # rendered, and the next buffer starts after it.
             note["phase"] = float(
                 (note["phase"] + 2 * np.pi * freq * frames / SAMPLE_RATE)
                 % (2 * np.pi)
             )
             note["samples"] += frames
 
-            # Decay already accounts for sustain, so an inaudible note is
-            # always safe to drop -- otherwise held notes pile up forever.
             if note["samples"] > ATTACK_SAMPLES and envelope[-1] < 0.0008:
                 finished.append(freq)
 
@@ -127,7 +115,7 @@ key_to_note = {
 def on_press(key):
     global sustain_active, current_octave
 
-    # Special keys have no .char, so they are matched before any char lookup.
+    # Special keys have no .char, so match them first.
     if key == keyboard.Key.space:
         sustain_active = True
         return
@@ -171,21 +159,40 @@ def on_release(key):
         sustain_active = False
 
 
-print("Piano | 1–6 = octave | [ ] = shift | SPACE = sustain | ESC = quit")
+BANNER = "Piano | 1–6 = octave | [ ] = shift | SPACE = sustain | ESC = quit"
 
-stream = sd.OutputStream(
-    samplerate=SAMPLE_RATE,
-    channels=1,
-    dtype='float32',
-    callback=synth_callback,
-    blocksize=2048,
-    latency='low'
-)
 
-stream.start()
+def main():
+    """Open the audio stream and play until ESC is pressed."""
+    try:
+        stream = sd.OutputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype='float32',
+            callback=synth_callback,
+            blocksize=BLOCK_SIZE,
+            latency='low'
+        )
+    except Exception as exc:
+        print(f"Could not open an audio output device: {exc}", file=sys.stderr)
+        return 1
 
-with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
-    listener.join()
+    print(BANNER)
 
-stream.stop()
-stream.close()
+    stream.start()
+    try:
+        with keyboard.Listener(
+            on_press=on_press, on_release=on_release
+        ) as listener:
+            listener.join()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stream.stop()
+        stream.close()
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

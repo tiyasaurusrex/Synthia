@@ -7,7 +7,7 @@
 ![DSP](https://img.shields.io/badge/Focus-Digital%20Signal%20Processing-purple)
 ![Status](https://img.shields.io/badge/Project-Active-brightgreen)
 
-readme to be updated shortly!!
+A playable piano where every note is computed, not recorded.
 
 This is a real-time digital piano synthesizer built entirely using mathematical waveform generation — **no prerecorded samples, no sound engines, no MIDI libraries**.
 
@@ -296,18 +296,41 @@ itself is switchable — so the full A0–C6 frequency table is reachable.
 
 ## Requirements
 - Python 3.9+
-- pip
+- An audio output device
 
-## Install Dependencies
+## Install
 
 ```bash
-pip install numpy sounddevice pynput
+pip install synthia-piano
 ```
 
-## Run the Program
+## Play
 
 ```bash
-python pianokeys.py
+synthia
+```
+
+Equivalently, `python -m synthia`.
+
+## Permissions
+
+Synthia reads the keyboard globally, so the OS has to allow it:
+
+- **macOS** — the first run prompts for Accessibility access
+  (System Settings → Privacy & Security → Accessibility). Grant it to the
+  terminal you launched from, then restart the command. Without it the
+  program starts and makes no sound, because no key events arrive.
+- **Linux** — needs an X11 session. Under Wayland, key capture is blocked
+  by the compositor.
+- **Windows** — works without extra permissions.
+
+## Running from source
+
+```bash
+git clone https://github.com/tiyasaurusrex/Synthia..git
+cd Synthia.
+pip install -e .
+synthia
 ```
 
 ---
